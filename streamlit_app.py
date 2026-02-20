@@ -82,28 +82,31 @@ def compute_features(df, rolling_n):
         np.sign(agg["ΔPrice_CE"].fillna(0)) * agg["CE_vol_delta"].fillna(0)
     ).rolling(rolling_n, min_periods=3).sum()
 
-    # signals
+    # simplified signal strength (-1,0,+1)
     def regime_strength(r):
         score = 0
-        if r["Vol_Imbalance"] > 0.3 and r["ΔVWAP"] > 0: score += 1
-        if r["Vol_Imbalance"] < -0.3 and r["ΔVWAP"] < 0: score -= 1
-        if r["Pressure_Score"] > 0: score += 1
-        if r["Pressure_Score"] < 0: score -= 1
-        return np.clip(score, -1, 1)  # -1,0,+1
-    agg["Signal_Strength"] = agg.apply(regime_strength, axis=1)
+        if r["Vol_Imbalance"] > 0.3 and r["ΔVWAP"] > 0:
+            score += 1
+        if r["Vol_Imbalance"] < -0.3 and r["ΔVWAP"] < 0:
+            score -= 1
+        if r["Pressure_Score"] > 0:
+            score += 1
+        if r["Pressure_Score"] < 0:
+            score -= 1
+        return np.clip(score, -1, 1)
 
+    agg["Signal_Strength"] = agg.apply(regime_strength, axis=1)
     agg.fillna(0, inplace=True)
     return agg
 
 agg = compute_features(df, rolling_n)
+chart_df = agg.reset_index()
 
 # ---------- Summary Table ----------
 st.subheader("📋 Summary Table — All Uploaded Files")
-st.dataframe(agg.reset_index(), use_container_width=True)
+st.dataframe(chart_df, use_container_width=True)
 
 # ---------- Separate Charts ----------
-chart_df = agg.reset_index()
-
 st.subheader("📈 Volume Imbalance Trend")
 vol_chart = (
     alt.Chart(chart_df)
@@ -128,7 +131,7 @@ vwap_chart = (
 )
 st.altair_chart(vwap_chart, use_container_width=True)
 
-# ---------- Signal Strength Bar ----------
+# ---------- Signal Strength Bar (Fixed Altair v6) ----------
 st.subheader("💡 Signal Strength per Snapshot (-1 = Bearish, 0 = Neutral, +1 = Bullish)")
 sig_chart = (
     alt.Chart(chart_df)
@@ -136,10 +139,10 @@ sig_chart = (
     .encode(
         x="timestamp:T",
         y=alt.Y("Signal_Strength:Q", title="Signal Strength"),
-        color=alt.condition(
-            "datum.Signal_Strength > 0",
-            alt.value("#21BA45"),  # green
-            alt.condition("datum.Signal_Strength < 0", alt.value("#DB2828"), alt.value("#AAAAAA")),
+        color=alt.Color(
+            "Signal_Strength:Q",
+            scale=alt.Scale(domain=[-1, 0, 1], range=["#DB2828", "#AAAAAA", "#21BA45"]),
+            legend=alt.Legend(title="Signal")
         ),
         tooltip=["timestamp:T", "Signal_Strength"]
     )
@@ -147,9 +150,7 @@ sig_chart = (
 st.altair_chart(sig_chart, use_container_width=True)
 
 # ---------- Download ----------
-csv = agg.reset_index().to_csv(index=False).encode("utf-8")
+csv = chart_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Metrics CSV", csv, "option_volume_metrics.csv", "text/csv")
 
 st.caption("© 2024 — Experimental analytics tool. Not trading advice.")
-
-
