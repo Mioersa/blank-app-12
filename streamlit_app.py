@@ -140,48 +140,80 @@ chart_df = feat_pred.reset_index()
 st.subheader("📋 Summary Table – All Uploaded Files")
 st.dataframe(chart_df, use_container_width=True)
 
-# ---------- PLOTS ----------
+# ---------- VISUALS ----------
 st.subheader("📈 Volume Imbalance Over Time")
-imb_chart = (
+st.altair_chart(
     alt.Chart(chart_df)
     .mark_line(color="#FFA500")
-    .encode(x="timestamp:T", y="Vol_Imbalance:Q")
+    .encode(x="timestamp:T", y="Vol_Imbalance:Q"),
+    use_container_width=True
 )
-st.altair_chart(imb_chart, use_container_width=True)
 
 st.subheader("📈 ΔVWAP Over Time")
-vwap_chart = (
+st.altair_chart(
     alt.Chart(chart_df)
     .mark_line(color="#00CC66")
-    .encode(x="timestamp:T", y="ΔVWAP:Q")
+    .encode(x="timestamp:T", y="ΔVWAP:Q"),
+    use_container_width=True
 )
-st.altair_chart(vwap_chart, use_container_width=True)
+
+# ensure clean data types for Altair
+chart_df["Sentiment"] = chart_df["Sentiment"].astype(str)
+chart_df["Regime_Cluster"] = chart_df["Regime_Cluster"].astype(str)
+chart_df = chart_df.fillna(0)
 
 st.subheader("🌀 Regime Discovery (with Sentiment)")
+
 reg_plot = (
     alt.Chart(chart_df)
-    .mark_circle(size=70)
+    .mark_circle(size=70, opacity=0.8)
     .encode(
-        x="Vol_Spike:Q",
-        y="Pressure_Score:Q",
-        color=alt.Color("Sentiment:N",
-                        scale=alt.Scale(domain=["Bearish","Neutral","Bullish"],
-                                        range=["#DB2828","#AAAAAA","#21BA45"])),
-        tooltip=["timestamp:T","Vol_Spike","Pressure_Score","Sentiment"]
+        x=alt.X("Vol_Spike:Q", title="Volume Spike"),
+        y=alt.Y("Pressure_Score:Q", title="Pressure Score"),
+        color=alt.Color(
+            "Sentiment:N",
+            scale=alt.Scale(
+                domain=["Bearish", "Neutral", "Bullish"],
+                range=["#DB2828", "#AAAAAA", "#21BA45"]
+            ),
+            legend=alt.Legend(title="Sentiment")
+        ),
+        tooltip=[
+            "timestamp:T",
+            "Vol_Spike:Q",
+            "Pressure_Score:Q",
+            "Sentiment:N"
+        ]
     )
 )
 st.altair_chart(reg_plot, use_container_width=True)
 st.markdown(
-    f"**Regime Sentiments:** " + 
-    ", ".join([f"Cluster {c} → {lab}" for c, lab in sent_map.items()])
+    " " + " • ".join(
+        [f"<b>Cluster {c}</b> → {lab}" for c, lab in sent_map.items()]
+    ),
+    unsafe_allow_html=True
 )
 
-st.subheader("🔮 Predicted ΔCE and ΔPE Price Movements")
-pred_ce = alt.Chart(chart_df).mark_line(color="#2980B9").encode(x="timestamp:T", y="Pred_ΔCE:Q")
-pred_pe = alt.Chart(chart_df).mark_line(color="#E67E22").encode(x="timestamp:T", y="Pred_ΔPE:Q")
-st.altair_chart(alt.layer(pred_ce, pred_pe).resolve_scale(y="independent"), use_container_width=True)
+st.subheader("🔮 Predicted ΔCE & ΔPE Price Movements")
+
+pred_ce = (
+    alt.Chart(chart_df)
+    .mark_line(color="#2980B9")
+    .encode(x="timestamp:T", y="Pred_ΔCE:Q")
+)
+pred_pe = (
+    alt.Chart(chart_df)
+    .mark_line(color="#E67E22")
+    .encode(x="timestamp:T", y="Pred_ΔPE:Q")
+)
+st.altair_chart(
+    alt.layer(pred_ce, pred_pe).resolve_scale(y="independent"),
+    use_container_width=True
+)
 
 csv = chart_df.to_csv(index=False).encode("utf-8")
-st.download_button("⬇️ Download Metrics CSV", csv, "option_deep_metrics.csv", "text/csv")
+st.download_button(
+    "⬇️ Download Metrics CSV", csv, "option_deep_metrics.csv", "text/csv"
+)
 
 st.caption("© 2024 — Experimental analytics demo. Not trading advice.")
