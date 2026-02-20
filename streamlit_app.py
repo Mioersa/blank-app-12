@@ -190,30 +190,42 @@ cols_show=[
 ]
 st.dataframe(df_feat[cols_show],use_container_width=True)
 
-# ---- HUMAN INTERPRETATION OF VOLUME/ VWAP TRENDS ----
+# ---- HUMAN INTERPRETATION OF VOLUME / VWAP ----
 st.subheader("🔍 Volume Imbalance & VWAP Trend Insights")
 
 def interpret_volume_vwap(agg):
     last=agg.iloc[-1]
     lines=[]
     if last["Vol_imbalance"]>0.3 and last["ΔVWAP"]>0:
-        lines.append("✅ Strong call‑side buying with rising VWAP: trend supportive of CE price gains.")
+        lines.append("✅ Strong call‑side buying with rising VWAP → CE up‑bias.")
     elif last["Vol_imbalance"]<-0.3 and last["ΔVWAP"]<0:
-        lines.append("⚠️ Heavy put‑side flow with falling VWAP: indicates downward momentum.")
+        lines.append("⚠️ Heavy put‑side flow with falling VWAP → PE up‑bias.")
     elif abs(last["Vol_imbalance"])<0.2 and abs(last["ΔVWAP"])<0.02:
-        lines.append("😐 Flows even and VWAP flat → market indecision.")
+        lines.append("😐 Even flows; VWAP flat → indecision.")
     else:
-        lines.append("🔄 Mixed: Volume and VWAP diverging (possible churn/false breakout).")
-    lines.append(f"Current Vol Imbalance: {last['Vol_imbalance']:.2f}, ΔVWAP: {last['ΔVWAP']:.2f}")
+        lines.append("🔄 Mixed readings → possible churn or fake breakout.")
+    lines.append(f"Vol Imbalance {last['Vol_imbalance']:.2f} | ΔVWAP {last['ΔVWAP']:.2f}")
     return "\n".join(lines)
 
 st.info(interpret_volume_vwap(df_feat))
 
-# ---- ALT VIEW (optional small chart for reference) ----
-st.subheader("📈 Mini Timeline (Visual Aid)")
-chart = alt.Chart(df_feat.reset_index()).transform_fold(
-    ["Vol_imbalance","ΔVWAP"],as_=["Metric","Value"]
-).mark_line().encode(
-    x="timestamp:T",color="Metric:N",y="Value:Q",tooltip=["timestamp","Metric","Value"]
-).interactive()
-st.altair_chart(chart,use_container_width=True)
+# ---- SAFE MINI‑CHART ----
+st.subheader("📈 Mini Timeline Visual")
+
+try:
+    chart_df = df_feat.reset_index()[["timestamp","Vol_imbalance","ΔVWAP"]].copy()
+    chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"], errors="coerce")
+    chart_df = chart_df.dropna(subset=["timestamp"])
+    # ensure numeric
+    chart_df["Vol_imbalance"] = pd.to_numeric(chart_df["Vol_imbalance"], errors="coerce")
+    chart_df["ΔVWAP"] = pd.to_numeric(chart_df["ΔVWAP"], errors="coerce")
+    if len(chart_df):
+        base = alt.Chart(chart_df).encode(x="timestamp:T")
+        c1 = base.mark_line(color="orange").encode(y=alt.Y("Vol_imbalance:Q", title="Vol Imbalance"))
+        c2 = base.mark_line(color="green").encode(y=alt.Y("ΔVWAP:Q", title="ΔVWAP"))
+        st.altair_chart(alt.layer(c1, c2).resolve_scale(y='independent'),
+                        use_container_width=True)
+    else:
+        st.warning("Not enough valid numeric data to plot Vol Imbalance / ΔVWAP.")
+except Exception as e:
+    st.warning(f"Chart render skipped: {e}")
