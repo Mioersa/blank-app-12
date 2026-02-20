@@ -6,7 +6,7 @@ import altair as alt
 
 # ======================================
 st.set_page_config("Rule‑Based Intraday Option Signals", layout="wide")
-st.title("📊 Rule‑Based Intraday Option Signal System (Advanced Price‑Volume Edition)")
+st.title("📊 Rule‑Based Intraday Option Signal System – Final Edition")
 
 # ---- SIDEBAR ----
 rolling_n = st.sidebar.number_input("Rolling window (bars)", 3, 60, 5)
@@ -14,6 +14,7 @@ spread_cutoff = st.sidebar.slider("Max bid‑ask spread %", 0.0, 1.0, 0.2)
 basis = st.sidebar.radio("Top‑strike ranking basis", ["Open Interest", "Volume"])
 num_strikes = st.sidebar.number_input("Top strikes by basis", 1, 30, 6)
 st.sidebar.markdown("Upload **Option‑Chain CSV files** 👇")
+
 uploaded = st.file_uploader("Drop CSV files (multiple allowed)",
                              type=["csv"], accept_multiple_files=True)
 if not uploaded:
@@ -31,8 +32,9 @@ for f in uploaded:
     df=pd.read_csv(f)
     df["timestamp"]=ts
     frames.append(df)
+
 raw=pd.concat(frames,ignore_index=True).sort_values("timestamp")
-st.success(f"✅ Loaded {len(uploaded)} file(s), {len(raw)} rows.")
+st.success(f"✅ Loaded {len(uploaded)} file(s), {len(raw)} rows total.")
 
 # ---- CLEAN ----
 def clean_data(df,cuto=0.2):
@@ -62,7 +64,7 @@ df=clean_data(raw,spread_cutoff)
 def rolling_corr(a,b,window=10,minp=3):
     arr=np.full(len(a),np.nan)
     for i in range(window,len(a)):
-        xa,xb=a[i-window:i], b[i-window:i]
+        xa,xb=a[i-window:i],b[i-window:i]
         if np.std(xa)>1e-8 and np.std(xb)>1e-8:
             arr[i]=np.corrcoef(xa,xb)[0,1]
     return pd.Series(arr).fillna(method="bfill").fillna(0)
@@ -87,7 +89,7 @@ def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
         "CE_vol_delta":"sum","PE_vol_delta":"sum",
         "CE_impliedVolatility":"mean","PE_impliedVolatility":"mean"
     })
-    # Existing derived fields
+    # core diffs
     agg["ΔPrice_CE"]=agg["CE_lastPrice"].diff()
     agg["ΔOI_CE"]=agg["CE_changeinOpenInterest"].diff()
     agg["ΔPrice_PE"]=agg["PE_lastPrice"].diff()
@@ -99,7 +101,7 @@ def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
     total_vol=agg["CE_vol_delta"]+agg["PE_vol_delta"]
     agg["Volume_spike"]=total_vol/total_vol.rolling(rolling_n).mean()
 
-    # --- Advanced price-volume metrics ---
+    # advanced metrics
     agg["VWAP"]=(
         (agg["CE_lastPrice"]*agg["CE_vol_delta"] + agg["PE_lastPrice"]*agg["PE_vol_delta"])
         /(agg["CE_vol_delta"]+agg["PE_vol_delta"]).replace(0,np.nan)
@@ -110,14 +112,13 @@ def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
     agg["Cum_tick_flow"]=np.cumsum(np.sign(agg["ΔPrice_CE"].fillna(0))*agg["CE_vol_delta"])
     agg["Corr_PriceVol"]=rolling_corr(agg["ΔPrice_CE"].values,agg["CE_vol_delta"].values,window=rolling_n)
     agg["Corr_IVVol"]=rolling_corr(agg["ΔIV"].values,agg["Volume_spike"].values,window=rolling_n)
-
     agg.fillna(0,inplace=True)
     return agg,covered_pct
 
 df_feat,covered_pct=compute_features(df,rolling_n,num_strikes,basis)
-st.caption(f"**Top {num_strikes} strikes** cover ≈ {covered_pct}% of total {basis.lower()}.")
+st.caption(f"Top {num_strikes} strikes ≈ {covered_pct}% of total {basis.lower()} coverage.")
 
-# ---- REGIME LOGIC ----
+# ---- LOGIC ----
 def detect_regime(row):
     reg,bias="quiet","neutral"
     if row["ΔPrice_CE"]*row["ΔOI_CE"]>0 and row["Volume_spike"]>1: reg="trend"
@@ -143,62 +144,76 @@ df_feat["signal_numeric"]=df_feat["signal"].map({
     "SELL_STRANGLE":0,"HOLD":0,"EXIT_POSITION":-1
 }).fillna(0)
 
-# ---- HUMAN READABLE SUPPLEMENT ----
+# ---- HUMAN INTERPRETATIONS ----
 def signal_summary(r):
-    text=[]
-    if r["Vol_imbalance"]>0.3: text.append("🔼 Call‑side volume dominating → upward flow pressure.")
-    elif r["Vol_imbalance"]<-0.3: text.append("🔽 Put‑side volume dominating → downside pressure.")
-    else: text.append("🟧 Volume balanced between CE & PE.")
-    if r["ΔVWAP"]>0: text.append("VWAP rising → buyers lifting offer prices.")
-    elif r["ΔVWAP"]<0: text.append("VWAP falling → sellers in control.")
-    if r["Corr_PriceVol"]>0.5: text.append("Strong price‑volume positive corr → conviction buying.")
-    elif r["Corr_PriceVol"]<-0.5: text.append("Negative price‑volume corr → distribution / absorption.")
-    if r["Absorption_idx"]<1: text.append("Absorption – OI not rising with volume → possible trap/reversal.")
-    if r["Corr_IVVol"]>0.4: text.append("IV rising with volume → speculative interest building.")
-    elif r["Corr_IVVol"]<-0.4: text.append("IV falling as volume grows → hedges unwinding.")
-
-    # Conclusive directional statement
-    concl="CE/PE prices likely steady."
-    if r["Vol_imbalance"]>0.3 and r["ΔVWAP"]>0: concl="📈 CE prices could rise, PE could soften."
-    elif r["Vol_imbalance"]<-0.3 and r["ΔVWAP"]<0: concl="📉 PE prices could rise, CE could weaken."
-    text.append(concl)
-    return "\n".join(text)
+    txt=[]
+    # Volume imbalance meaning
+    if r["Vol_imbalance"]>0.3:
+        txt.append("Call volume dominant → market leaning bullish.")
+    elif r["Vol_imbalance"]<-0.3:
+        txt.append("Put volume dominant → market leaning bearish.")
+    else:
+        txt.append("Balanced flow across calls/puts.")
+    # VWAP shift
+    if r["ΔVWAP"]>0: txt.append("VWAP rising → buyers lifting offers.")
+    elif r["ΔVWAP"]<0: txt.append("VWAP falling → sellers hitting bids.")
+    else: txt.append("VWAP stable → sideways flows.")
+    # Correlation layer
+    if r["Corr_PriceVol"]>0.5: txt.append("Strong +corr: conviction buying.")
+    elif r["Corr_PriceVol"]<-0.5: txt.append("Negative corr: distribution/absorption.")
+    # Absorption / IV confirmation
+    if r["Absorption_idx"]<1: txt.append("Low absorption_idx (<1) → Smart money absorbing volume, possible reversal.")
+    if r["Corr_IVVol"]>0.4: txt.append("IV rising with volume → speculative build‑up.")
+    elif r["Corr_IVVol"]<-0.4: txt.append("IV dropping with volume → hedge unwind.")
+    # Final inference
+    concl="Stable bias; CE & PE may stay range‑bound."
+    if r["Vol_imbalance"]>0.3 and r["ΔVWAP"]>0: concl="CE prices likely to rise; PE soften."
+    elif r["Vol_imbalance"]<-0.3 and r["ΔVWAP"]<0: concl="PE prices likely to rise; CE weaken."
+    txt.append("🧭 "+concl)
+    return "\n".join(txt)
 
 df_feat["Implied_Signal_Text"]=df_feat.apply(signal_summary,axis=1)
 
-# ---- DISPLAY ----
+# ---- METRICS ----
 lat=df_feat.iloc[-1]
 c1,c2,c3,c4=st.columns(4)
 c1.metric("Current PCR (OI)",round(float(lat["PCR_OI"]),2))
-c2.metric("# Trend Bars",int((df_feat["regime"]=="trend").sum()))
+c2.metric("Trend Bars",int((df_feat["regime"]=="trend").sum()))
 c3.metric("Latest Signal",lat["signal"])
 c4.metric("Rows Processed",len(df_feat))
 
-def pcr_text(p):
-    if p<0.7:return"🐂 Bullish – calls lead"
-    if 0.7<=p<=1.2:return"🟧 Neutral structure"
-    return"🐻 Bearish – puts build"
-st.caption(f"**PCR Interpretation:** {pcr_text(lat['PCR_OI'])}")
+# ---- DETAILED TABLE ----
+st.subheader("📋 Detailed Signals – All Timestamps")
+cols_show=[
+    "signal","bias","regime","Vol_imbalance","ΔVWAP","Corr_PriceVol",
+    "Absorption_idx","Corr_IVVol","PCR_OI","Implied_Signal_Text"
+]
+st.dataframe(df_feat[cols_show],use_container_width=True)
 
-st.subheader("🧾 Recent Signals + Implied Metrics")
-st.dataframe(
-    df_feat.tail(10)[["signal","bias","Vol_imbalance","ΔVWAP","Corr_PriceVol","Absorption_idx","Corr_IVVol","Implied_Signal_Text"]],
-    use_container_width=True
-)
+# ---- HUMAN INTERPRETATION OF VOLUME/ VWAP TRENDS ----
+st.subheader("🔍 Volume Imbalance & VWAP Trend Insights")
 
-st.subheader("🌀 Signal / Bias Timeline")
-sig_chart=alt.Chart(df_feat.reset_index()).mark_circle(size=80).encode(
-    x="timestamp:T",
-    y=alt.Y("signal_numeric:Q",scale=alt.Scale(domain=[-1.2,1.2]),
-            title="Signal (‑1 = Sell, 0 = Hold, +1 = Buy)"),
-    color="bias:N",tooltip=["timestamp","signal","bias","regime"])
-st.altair_chart(sig_chart,use_container_width=True)
+def interpret_volume_vwap(agg):
+    last=agg.iloc[-1]
+    lines=[]
+    if last["Vol_imbalance"]>0.3 and last["ΔVWAP"]>0:
+        lines.append("✅ Strong call‑side buying with rising VWAP: trend supportive of CE price gains.")
+    elif last["Vol_imbalance"]<-0.3 and last["ΔVWAP"]<0:
+        lines.append("⚠️ Heavy put‑side flow with falling VWAP: indicates downward momentum.")
+    elif abs(last["Vol_imbalance"])<0.2 and abs(last["ΔVWAP"])<0.02:
+        lines.append("😐 Flows even and VWAP flat → market indecision.")
+    else:
+        lines.append("🔄 Mixed: Volume and VWAP diverging (possible churn/false breakout).")
+    lines.append(f"Current Vol Imbalance: {last['Vol_imbalance']:.2f}, ΔVWAP: {last['ΔVWAP']:.2f}")
+    return "\n".join(lines)
 
-# --- Extra visual for imbalance ---
-st.subheader("⚖️ Volume Imbalance & VWAP Trend")
-imb_chart=alt.LayerChart(df_feat.reset_index())
-imbalance=alt.Chart(df_feat.reset_index()).mark_line(color="orange").encode(
-    x="timestamp:T",y="Vol_imbalance:Q")
-vwap=alt.Chart(df_feat.reset_index()).mark_line(color="green").encode(
-    x="timestamp:T",y="ΔVWAP:Q")
-st.altair_chart(imbalance+vwap,use_container_width=True)
+st.info(interpret_volume_vwap(df_feat))
+
+# ---- ALT VIEW (optional small chart for reference) ----
+st.subheader("📈 Mini Timeline (Visual Aid)")
+chart = alt.Chart(df_feat.reset_index()).transform_fold(
+    ["Vol_imbalance","ΔVWAP"],as_=["Metric","Value"]
+).mark_line().encode(
+    x="timestamp:T",color="Metric:N",y="Value:Q",tooltip=["timestamp","Metric","Value"]
+).interactive()
+st.altair_chart(chart,use_container_width=True)
