@@ -4,8 +4,8 @@ import numpy as np
 from datetime import datetime
 import altair as alt
 from sklearn.linear_model import Ridge
-from sklearn.model_selection import train_test_split
 from sklearn.cluster import KMeans
+from sklearn.model_selection import train_test_split
 
 # ---------------- CONFIG ----------------
 st.set_page_config("Deep Intraday Option Analyzer", layout="wide")
@@ -15,205 +15,125 @@ st.title("📊 Deep Intraday Option Analytics – Volume • Regime • Forecast
 st.sidebar.header("Settings")
 rolling_n = st.sidebar.number_input("Rolling window (bars)", 3, 60, 5)
 spread_cutoff = st.sidebar.slider("Max bid–ask spread %", 0.0, 1.0, 0.2)
-st.sidebar.markdown("Upload **incremental 5‑min Option‑Chain CSVs** 👇")
-uploads = st.file_uploader("", type="csv", accept_multiple_files=True)
+uploads = st.file_uploader("Upload 5‑min option chain CSVs", type="csv", accept_multiple_files=True)
 if not uploads:
-    st.info("⬅️ Upload CSVs to begin analysis.")
     st.stop()
 
 # ---------- LOAD ----------
 frames = []
 for f in uploads:
     try:
-        name = f.name.replace(".csv", "")
-        ts = datetime.strptime(
-            name.split("_")[-2] + "_" + name.split("_")[-1], "%d%m%Y_%H%M%S"
-        )
+        nm = f.name.replace(".csv", "")
+        ts = datetime.strptime(nm.split("_")[-2] + "_" + nm.split("_")[-1], "%d%m%Y_%H%M%S")
     except Exception:
         ts = datetime.now()
     df = pd.read_csv(f)
     df["timestamp"] = ts
     frames.append(df)
-
 raw = pd.concat(frames).sort_values(["timestamp", "CE_strikePrice"]).reset_index(drop=True)
 
 # ---------- CLEAN ----------
 @st.cache_data
 def clean(df, cutoff):
-    df = df.copy()
     for s in ["CE", "PE"]:
         df[f"{s}_mid"] = (df[f"{s}_buyPrice1"] + df[f"{s}_sellPrice1"]) / 2
-        df[f"{s}_spread_pct"] = abs(
-            df[f"{s}_sellPrice1"] - df[f"{s}_buyPrice1"]
-        ) / df[f"{s}_mid"].replace(0, np.nan)
+        df[f"{s}_spread_pct"] = abs(df[f"{s}_sellPrice1"] - df[f"{s}_buyPrice1"]) / df[f"{s}_mid"].replace(0, np.nan)
     df = df[(df["CE_spread_pct"] < cutoff) & (df["PE_spread_pct"] < cutoff)]
     return df
+df = clean(raw.copy(), spread_cutoff)
+st.success(f"Loaded {len(uploads)} files, {len(df)} rows after cleaning.")
 
-
-df = clean(raw, spread_cutoff)
-st.success(f"✅ Loaded {len(uploads)} files, {len(df)} rows after cleaning.")
-
-# ---------- FEATURES ----------
+# ---------- FEATURE BUILDER ----------
 @st.cache_data
 def build_features(df, rolling_n):
-    feat = df.copy()
+    data = df.copy()
     for s in ["CE", "PE"]:
-        feat[f"{s}_vol_delta"] = feat.groupby("CE_strikePrice")[
-            f"{s}_totalTradedVolume"
-        ].diff().fillna(0)
-        feat[f"{s}_OI_delta"] = feat.groupby("CE_strikePrice")[
-            f"{s}_openInterest"
-        ].diff().fillna(0)
-        feat[f"{s}_price_delta"] = feat.groupby("CE_strikePrice")[
-            f"{s}_lastPrice"
-        ].diff().fillna(0)
-
-    agg = feat.groupby("timestamp").agg(
-        CE_price=("CE_lastPrice", "mean"),
-        PE_price=("PE_lastPrice", "mean"),
-        CE_vol=("CE_vol_delta", "sum"),
-        PE_vol=("PE_vol_delta", "sum"),
-        CE_OI_delta=("CE_OI_delta", "sum"),
-        PE_OI_delta=("PE_OI_delta", "sum"),
+        data[f"{s}_vol_delta"] = data.groupby("CE_strikePrice")[f"{s}_totalTradedVolume"].diff().fillna(0)
+        data[f"{s}_OI_delta"] = data.groupby("CE_strikePrice")[f"{s}_openInterest"].diff().fillna(0)
+        data[f"{s}_price_delta"] = data.groupby("CE_strikePrice")[f"{s}_lastPrice"].diff().fillna(0)
+    agg = data.groupby("timestamp").agg(
+        CE_price=("CE_lastPrice","mean"),
+        PE_price=("PE_lastPrice","mean"),
+        CE_vol=("CE_vol_delta","sum"),
+        PE_vol=("PE_vol_delta","sum"),
+        CE_OI_delta=("CE_OI_delta","sum"),
+        PE_OI_delta=("PE_OI_delta","sum"),
     )
-
     agg["Total_Volume"] = agg["CE_vol"] + agg["PE_vol"]
-    agg["Vol_Imbalance"] = (agg["CE_vol"] - agg["PE_vol"]) / (
-        agg["Total_Volume"].replace(0, np.nan)
-    )
-    agg["ΔVWAP"] = (
-        (agg["CE_price"] * agg["CE_vol"] + agg["PE_price"] * agg["PE_vol"])
-        / agg["Total_Volume"].replace(0, np.nan)
-    ).diff()
-
-    agg["Vol_Spike"] = agg["Total_Volume"] / agg["Total_Volume"].rolling(rolling_n).mean()
-    agg["Vol_Momentum"] = agg["Total_Volume"] / agg["Total_Volume"].shift(rolling_n) - 1
-    agg["Pressure_Score"] = (
-        np.sign(agg["CE_price"].diff().fillna(0)) * agg["CE_vol"].fillna(0)
-    ).rolling(rolling_n, min_periods=1).sum()
-    agg["Absorption_Index"] = np.abs(agg["CE_OI_delta"]) / (np.abs(agg["CE_vol"]) + 1)
-    agg.fillna(0, inplace=True)
+    agg["Vol_Imbalance"] = (agg["CE_vol"] - agg["PE_vol"])/(agg["Total_Volume"].replace(0,np.nan))
+    agg["ΔVWAP"] = ((agg["CE_price"]*agg["CE_vol"] + agg["PE_price"]*agg["PE_vol"])/agg["Total_Volume"].replace(0,np.nan)).diff()
+    agg["Vol_Spike"] = agg["Total_Volume"]/agg["Total_Volume"].rolling(rolling_n).mean()
+    agg["Vol_Momentum"] = agg["Total_Volume"]/agg["Total_Volume"].shift(rolling_n)-1
+    agg["Pressure_Score"] = (np.sign(agg["CE_price"].diff().fillna(0))*agg["CE_vol"]).rolling(rolling_n,min_periods=1).sum()
+    agg["Absorption_Index"] = np.abs(agg["CE_OI_delta"])/(agg["CE_vol"].abs()+1)
+    agg.fillna(0,inplace=True)
     return agg
-
-
 feat = build_features(df, rolling_n)
 
 # ---------- REGIME DISCOVERY ----------
 chart_df = feat.reset_index()
-kmod = KMeans(n_clusters=3, random_state=0).fit(
-    chart_df[["Vol_Spike", "Vol_Imbalance", "Pressure_Score"]]
-)
+kmod = KMeans(n_clusters=3, random_state=0).fit(chart_df[["Vol_Spike","Vol_Imbalance","Pressure_Score"]])
 chart_df["Regime_Cluster"] = kmod.labels_
-
-# sentiment mapping by mean imbalance
-sent_map = {}
-for cl in chart_df["Regime_Cluster"].unique():
-    val = chart_df.loc[chart_df["Regime_Cluster"] == cl, "Vol_Imbalance"].mean()
-    if val > 0.1:
-        sent_map[cl] = "Bullish"
-    elif val < -0.1:
-        sent_map[cl] = "Bearish"
-    else:
-        sent_map[cl] = "Neutral"
-chart_df["Sentiment"] = chart_df["Regime_Cluster"].map(sent_map)
+# classify sentiment by Vol_Imbalance mean
+sentiment_map={}
+for c in sorted(chart_df["Regime_Cluster"].unique()):
+    mean_val = chart_df.loc[chart_df["Regime_Cluster"]==c,"Vol_Imbalance"].mean()
+    if mean_val>0.1: sentiment_map[c]="Bullish"
+    elif mean_val<-0.1: sentiment_map[c]="Bearish"
+    else: sentiment_map[c]="Neutral"
+chart_df["Sentiment"] = chart_df["Regime_Cluster"].map(sentiment_map)
 
 # ---------- PREDICTIVE SIGNALS ----------
 @st.cache_data
 def predictive_models(feat):
     df = feat.copy()
-    df["ΔCE_price_next"] = df["CE_price"].diff().shift(-1).fillna(0)
-    df["ΔPE_price_next"] = df["PE_price"].diff().shift(-1).fillna(0)
-    X = (
-        df[["Vol_Spike", "Vol_Imbalance", "Pressure_Score", "Absorption_Index"]]
-        .shift(1)
-        .fillna(0)
-    )
-    ridge_ce = Ridge().fit(X, df["ΔCE_price_next"])
-    ridge_pe = Ridge().fit(X, df["ΔPE_price_next"])
+    df["ΔCE_next"] = df["CE_price"].diff().shift(-1).fillna(0)
+    df["ΔPE_next"] = df["PE_price"].diff().shift(-1).fillna(0)
+    X = df[["Vol_Spike","Vol_Imbalance","Pressure_Score","Absorption_Index"]].shift(1).fillna(0)
+    ridge_ce = Ridge().fit(X, df["ΔCE_next"])
+    ridge_pe = Ridge().fit(X, df["ΔPE_next"])
     df["Pred_ΔCE"] = ridge_ce.predict(X)
     df["Pred_ΔPE"] = ridge_pe.predict(X)
     return df
-
-
 feat_pred = predictive_models(feat)
 chart_df = feat_pred.reset_index()
-st.subheader("📋 Summary Table – All Uploaded Files")
-st.dataframe(chart_df, use_container_width=True)
-
-# ---------- VISUALS ----------
-st.subheader("📈 Volume Imbalance Over Time")
-st.altair_chart(
-    alt.Chart(chart_df)
-    .mark_line(color="#FFA500")
-    .encode(x="timestamp:T", y="Vol_Imbalance:Q"),
-    use_container_width=True
-)
-
-st.subheader("📈 ΔVWAP Over Time")
-st.altair_chart(
-    alt.Chart(chart_df)
-    .mark_line(color="#00CC66")
-    .encode(x="timestamp:T", y="ΔVWAP:Q"),
-    use_container_width=True
-)
-
-# ensure clean data types for Altair
-chart_df["Sentiment"] = chart_df["Sentiment"].astype(str)
-chart_df["Regime_Cluster"] = chart_df["Regime_Cluster"].astype(str)
+chart_df["Sentiment"] = chart_df.get("Sentiment", "Neutral").astype(str)
 chart_df = chart_df.fillna(0)
 
-st.subheader("🌀 Regime Discovery (with Sentiment)")
+# ---------- TABLE ----------
+st.subheader("📋 Summary Table")
+st.dataframe(chart_df, use_container_width=True)
 
-reg_plot = (
-    alt.Chart(chart_df)
-    .mark_circle(size=70, opacity=0.8)
+# ---------- VOLUME / VWAP PLOTS ----------
+st.subheader("📈 Volume Imbalance")
+st.altair_chart(alt.Chart(chart_df).mark_line(color="#FFA500").encode(x="timestamp:T",y="Vol_Imbalance:Q"), use_container_width=True)
+st.subheader("📈 ΔVWAP")
+st.altair_chart(alt.Chart(chart_df).mark_line(color="#00CC66").encode(x="timestamp:T",y="ΔVWAP:Q"), use_container_width=True)
+
+# ---------- REGIME CHART ----------
+st.subheader("🌀 Regime Discovery with Sentiment")
+reg_chart=(alt.Chart(chart_df)
+    .mark_circle(size=70,opacity=0.8)
     .encode(
-        x=alt.X("Vol_Spike:Q", title="Volume Spike"),
-        y=alt.Y("Pressure_Score:Q", title="Pressure Score"),
-        color=alt.Color(
-            "Sentiment:N",
-            scale=alt.Scale(
-                domain=["Bearish", "Neutral", "Bullish"],
-                range=["#DB2828", "#AAAAAA", "#21BA45"]
-            ),
-            legend=alt.Legend(title="Sentiment")
-        ),
-        tooltip=[
-            "timestamp:T",
-            "Vol_Spike:Q",
-            "Pressure_Score:Q",
-            "Sentiment:N"
-        ]
-    )
-)
-st.altair_chart(reg_plot, use_container_width=True)
-st.markdown(
-    " " + " • ".join(
-        [f"<b>Cluster {c}</b> → {lab}" for c, lab in sent_map.items()]
-    ),
-    unsafe_allow_html=True
-)
+        x=alt.X("Vol_Spike:Q",title="Volume Spike"),
+        y=alt.Y("Pressure_Score:Q",title="Pressure Score"),
+        color=alt.Color("Sentiment:N",
+                        scale=alt.Scale(
+                            domain=["Bearish","Neutral","Bullish"],
+                            range=["#DB2828","#AAAAAA","#21BA45"]
+                        )),
+        tooltip=["timestamp:T","Vol_Spike","Pressure_Score","Sentiment"]))
+st.altair_chart(reg_chart,use_container_width=True)
+st.markdown("  ".join([f"**Cluster {c} → {lab}**" for c,lab in sentiment_map.items()]))
 
-st.subheader("🔮 Predicted ΔCE & ΔPE Price Movements")
+# ---------- PREDICTIVE SIGNALS ----------
+st.subheader("🔮 Predicted ΔCE & ΔPE Prices")
+pred_ce=alt.Chart(chart_df).mark_line(color="#2980B9").encode(x="timestamp:T",y="Pred_ΔCE:Q")
+pred_pe=alt.Chart(chart_df).mark_line(color="#E67E22").encode(x="timestamp:T",y="Pred_ΔPE:Q")
+st.altair_chart(alt.layer(pred_ce,pred_pe).resolve_scale(y="independent"),use_container_width=True)
 
-pred_ce = (
-    alt.Chart(chart_df)
-    .mark_line(color="#2980B9")
-    .encode(x="timestamp:T", y="Pred_ΔCE:Q")
-)
-pred_pe = (
-    alt.Chart(chart_df)
-    .mark_line(color="#E67E22")
-    .encode(x="timestamp:T", y="Pred_ΔPE:Q")
-)
-st.altair_chart(
-    alt.layer(pred_ce, pred_pe).resolve_scale(y="independent"),
-    use_container_width=True
-)
+# ---------- DOWNLOAD ----------
+csv=chart_df.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Download Metrics CSV",csv,"option_deep_metrics.csv","text/csv")
 
-csv = chart_df.to_csv(index=False).encode("utf-8")
-st.download_button(
-    "⬇️ Download Metrics CSV", csv, "option_deep_metrics.csv", "text/csv"
-)
-
-st.caption("© 2024 — Experimental analytics demo. Not trading advice.")
+st.caption("© 2024 — Educational analytics demo · no trading advice.")
